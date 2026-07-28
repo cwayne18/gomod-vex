@@ -210,10 +210,10 @@ func govulncheckSource(ctx context.Context, workdir string) ([]Statement, error)
 	cmd.Stderr = &stderr
 	// govulncheck exits non-zero when vulnerabilities are found; that is not an
 	// error for us, so only fail when it produced no parseable output.
-	_ = cmd.Run()
+	runErr := cmd.Run()
 
 	if strings.TrimSpace(stdout.String()) == "" {
-		return nil, fmt.Errorf("govulncheck produced no output: %s", strings.TrimSpace(stderr.String()))
+		return nil, diagnoseNoOutput(ctx, runErr, stderr.String())
 	}
 
 	var doc openVEXDoc
@@ -234,6 +234,55 @@ func govulncheckSource(ctx context.Context, workdir string) ([]Statement, error)
 		})
 	}
 	return out, nil
+}
+
+// diagnoseNoOutput turns an empty-stdout govulncheck run into an actionable
+// error. The most common cause on very large repos (e.g. rancher/rancher) is
+// the OS OOM killer terminating govulncheck mid-analysis: the inner process
+// dies with SIGKILL and `go run` reports "signal: killed" on stderr.
+func diagnoseNoOutput(ctx context.Context, runErr error, stderr string) error {
+	stderrTxt := strings.TrimSpace(stderr)
+
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("govulncheck timed out (30m) analyzing this repo. "+
+			"Very large repos can exceed this; narrow the scan with --repo-path <subdir>, "+
+			"or use --image mode against a built image instead.%s", stderrSuffix(stderrTxt))
+	}
+
+	if wasKilled(runErr, stderrTxt) {
+		return fmt.Errorf("govulncheck was killed before producing output (likely out of memory). "+
+			"Source-mode call-graph analysis of large repos such as rancher/rancher can need several GB of RAM. "+
+			"Try one of: give the process more memory (in a container, raise the memory limit, e.g. docker run --memory=8g ...); "+
+			"scope the scan to a subdirectory with --repo-path <subdir>; "+
+			"or use --image mode against a built image instead.%s", stderrSuffix(stderrTxt))
+	}
+
+	if stderrTxt == "" && runErr != nil {
+		stderrTxt = runErr.Error()
+	}
+	return fmt.Errorf("govulncheck produced no output: %s", stderrTxt)
+}
+
+// wasKilled reports whether the govulncheck run ended in a SIGKILL, either on
+// the go-run wrapper itself or on the govulncheck child (which surfaces as a
+// "signal: killed" line on stderr).
+func wasKilled(runErr error, stderrTxt string) bool {
+	if strings.Contains(stderrTxt, "signal: killed") {
+		return true
+	}
+	if ee, ok := runErr.(*exec.ExitError); ok {
+		if ps := ee.ProcessState; ps != nil && ps.ExitCode() == -1 {
+			return true
+		}
+	}
+	return false
+}
+
+func stderrSuffix(stderrTxt string) string {
+	if stderrTxt == "" {
+		return ""
+	}
+	return "\ngovulncheck stderr: " + stderrTxt
 }
 
 // parsePurl extracts module + version from the first golang purl subcomponent,

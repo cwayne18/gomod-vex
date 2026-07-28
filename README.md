@@ -46,6 +46,12 @@ are stripped). Each advisory in the dependency graph is classified as
 `not_in_execute_path` (imported but unreachable) or `not_present` (unused).
 A local checkout path or `file://` URL is scanned in place without cloning.
 
+> **Large repos:** source-mode analysis builds a whole-program call graph and can
+> need several GB of RAM. Very large repos (e.g. `rancher/rancher`) may exhaust
+> memory — govulncheck gets OOM-killed (`signal: killed`). Give the process more
+> memory (in a container, raise the memory limit, e.g. `docker run --memory=8g`),
+> scope the scan with `--repo-path <subdir>`, or fall back to `--image` mode.
+
 ### LLM exploitability check (optional, `--llm`)
 
 For CVEs whose vulnerable code is genuinely linked (image mode) or reachable

@@ -1,6 +1,11 @@
 package source
 
-import "testing"
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestNormalizeRepo(t *testing.T) {
 	cases := map[string]string{
@@ -46,5 +51,33 @@ func TestParsePurlStdlib(t *testing.T) {
 	mod, ver := parsePurl(products)
 	if mod != "stdlib" || ver != "go1.21.5" {
 		t.Errorf("got %q@%q, want stdlib@go1.21.5", mod, ver)
+	}
+}
+
+func TestDiagnoseNoOutputOOM(t *testing.T) {
+	stderr := "go: downloading golang.org/x/vuln v1.6.0\nsignal: killed"
+	err := diagnoseNoOutput(context.Background(), nil, stderr)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "out of memory") || !strings.Contains(got, "--repo-path") {
+		t.Fatalf("unhelpful OOM error: %q", got)
+	}
+}
+
+func TestDiagnoseNoOutputTimeout(t *testing.T) {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	err := diagnoseNoOutput(ctx, ctx.Err(), "")
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("expected timeout error, got %v", err)
+	}
+}
+
+func TestDiagnoseNoOutputGeneric(t *testing.T) {
+	err := diagnoseNoOutput(context.Background(), nil, "some other failure")
+	if err == nil || !strings.Contains(err.Error(), "some other failure") {
+		t.Fatalf("expected passthrough error, got %v", err)
 	}
 }
