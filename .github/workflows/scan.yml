@@ -65,6 +65,31 @@ jobs:
         if: ${{ inputs.image != '' }}
         run: sudo apt-get update && sudo apt-get install -y skopeo
 
+      - name: Install cgo build dependencies
+        # Source-mode govulncheck compiles the target's packages to build a call
+        # graph, so any cgo package needs its C headers/libs present or package
+        # loading fails (e.g. libvirt, gpgme, btrfs). Install the common ones;
+        # tolerate any that don't resolve so one bad name doesn't fail the job.
+        if: ${{ inputs.repo != '' }}
+        run: |
+          sudo apt-get update
+          for p in \
+            pkg-config \
+            libvirt-dev \
+            libgpgme-dev \
+            libbtrfs-dev \
+            libdevmapper-dev \
+            libassuan-dev \
+            libseccomp-dev \
+            libsystemd-dev \
+            libpcap-dev \
+            libsqlite3-dev \
+            libselinux1-dev \
+            liblvm2-dev \
+            libudev-dev; do
+            sudo apt-get install -y "$p" || echo "::warning::could not install $p"
+          done
+
       - name: Add swap
         # Source-mode govulncheck builds a whole-program call graph and can need
         # well over the runner's RAM on large repos (e.g. rancher/rancher). A big
