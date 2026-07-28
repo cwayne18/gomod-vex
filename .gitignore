@@ -1,0 +1,7 @@
+# Binaries
+/gomod-vex
+/dist/
+
+# Local scratch
+*.out
+*.log
