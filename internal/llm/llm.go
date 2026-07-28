@@ -9,9 +9,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -123,9 +125,55 @@ func (c *Client) Assess(ctx context.Context, r Request) (*Verdict, error) {
 		return nil, err
 	}
 
+	const maxAttempts = 4
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		res, raw, err := c.do(ctx, body)
+		if err != nil {
+			lastErr = err
+			if !sleepBeforeRetry(ctx, attempt, maxAttempts, 0) {
+				return nil, err
+			}
+			continue
+		}
+
+		// The API does not always return JSON: rate limiting, gateway timeouts
+		// and auth failures can come back as plain text or HTML. Decode
+		// defensively and prefer the HTTP status when the body isn't JSON.
+		var cr chatResponse
+		decodeErr := json.Unmarshal(raw, &cr)
+
+		if res.StatusCode != http.StatusOK {
+			if decodeErr == nil && cr.Error != nil && cr.Error.Message != "" {
+				lastErr = fmt.Errorf("github models: %s (status %d)", cr.Error.Message, res.StatusCode)
+			} else {
+				lastErr = fmt.Errorf("github models: status %d: %s", res.StatusCode, snippet(raw))
+			}
+			if isRetryable(res.StatusCode) && sleepBeforeRetry(ctx, attempt, maxAttempts, retryAfter(res)) {
+				continue
+			}
+			return nil, lastErr
+		}
+		if decodeErr != nil {
+			return nil, fmt.Errorf("github models: could not parse response: %s", snippet(raw))
+		}
+		if cr.Error != nil && cr.Error.Message != "" {
+			return nil, fmt.Errorf("github models: %s", cr.Error.Message)
+		}
+		if len(cr.Choices) == 0 {
+			return nil, fmt.Errorf("github models: empty response")
+		}
+		return parseVerdict(cr.Choices[0].Message.Content)
+	}
+	return nil, lastErr
+}
+
+// do sends one request and returns the response (with a drained body) and the
+// raw body bytes.
+func (c *Client) do(ctx context.Context, body []byte) (*http.Response, []byte, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.Endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+c.Token)
@@ -133,27 +181,76 @@ func (c *Client) Assess(ctx context.Context, r Request) (*Verdict, error) {
 
 	res, err := c.HTTP.Do(httpReq)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer res.Body.Close()
 
-	var cr chatResponse
-	if err := json.NewDecoder(res.Body).Decode(&cr); err != nil {
-		return nil, err
+	raw, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if err != nil {
+		return nil, nil, err
 	}
-	if res.StatusCode != http.StatusOK {
-		if cr.Error != nil {
-			return nil, fmt.Errorf("github models: %s (status %d)", cr.Error.Message, res.StatusCode)
-		}
-		return nil, fmt.Errorf("github models: unexpected status %d", res.StatusCode)
+	return res, raw, nil
+}
+
+// isRetryable reports whether an HTTP status warrants another attempt.
+func isRetryable(status int) bool {
+	return status == http.StatusTooManyRequests || status >= 500
+}
+
+// retryAfter parses the Retry-After header (seconds only) into a duration.
+func retryAfter(res *http.Response) time.Duration {
+	if res == nil {
+		return 0
 	}
-	if len(cr.Choices) == 0 {
-		return nil, fmt.Errorf("github models: empty response")
+	v := strings.TrimSpace(res.Header.Get("Retry-After"))
+	if v == "" {
+		return 0
 	}
-	return parseVerdict(cr.Choices[0].Message.Content)
+	if secs, err := strconv.Atoi(v); err == nil && secs >= 0 {
+		return time.Duration(secs) * time.Second
+	}
+	return 0
+}
+
+// sleepBeforeRetry waits before the next attempt, using the server-provided
+// delay when available or exponential backoff otherwise. It returns false when
+// no further attempts should be made (last attempt or context cancelled).
+func sleepBeforeRetry(ctx context.Context, attempt, maxAttempts int, hint time.Duration) bool {
+	if attempt >= maxAttempts {
+		return false
+	}
+	wait := hint
+	if wait <= 0 {
+		wait = time.Duration(1<<uint(attempt-1)) * time.Second // 1s, 2s, 4s
+	}
+	if wait > 30*time.Second {
+		wait = 30 * time.Second
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(wait):
+		return true
+	}
 }
 
 var jsonObjRe = regexp.MustCompile(`(?s)\{.*\}`)
+
+// snippet returns a compact, single-line preview of a raw response body for use
+// in error messages, so non-JSON replies (rate-limit notices, HTML gateway
+// errors, etc.) are legible instead of dumping the whole payload.
+func snippet(b []byte) string {
+	s := strings.TrimSpace(string(b))
+	s = strings.Join(strings.Fields(s), " ")
+	const max = 200
+	if len(s) > max {
+		s = s[:max] + "..."
+	}
+	if s == "" {
+		return "(empty body)"
+	}
+	return s
+}
 
 // parseVerdict extracts the JSON object from a model reply, tolerating stray
 // markdown fences or prose around it.
