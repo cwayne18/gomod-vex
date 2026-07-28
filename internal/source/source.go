@@ -173,17 +173,38 @@ type product struct {
 	} `json:"subcomponents"`
 }
 
+// defaultGovulncheckVersion is the module version of govulncheck built and run
+// via `go run`. Override with GOMODVEX_GOVULNCHECK_VERSION.
+const defaultGovulncheckVersion = "latest"
+
 func govulncheckSource(ctx context.Context, workdir string) ([]Statement, error) {
-	if _, err := exec.LookPath("govulncheck"); err != nil {
-		return nil, fmt.Errorf("govulncheck not found on PATH: %w", err)
-	}
-	if _, err := exec.LookPath("go"); err != nil {
+	goBin, err := exec.LookPath("go")
+	if err != nil {
 		return nil, fmt.Errorf("go toolchain not found on PATH (required for source mode): %w", err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "govulncheck", "-C", workdir, "-format", "openvex", "./...")
+	version := os.Getenv("GOMODVEX_GOVULNCHECK_VERSION")
+	if version == "" {
+		version = defaultGovulncheckVersion
+	}
+
+	// Build and run govulncheck through `go run` from inside the target module
+	// rather than invoking a fixed govulncheck binary. This makes source mode
+	// robust to modules that require a newer Go than the one gomod-vex ships
+	// with, and avoids two related failure modes:
+	//   * a prebuilt govulncheck rejecting a module whose go.mod needs a newer
+	//     Go ("go.mod requires go >= 1.26.0 (running go 1.25 ...)"), and
+	//   * the "source-processing packages" version mismatch that occurs when the
+	//     toolchain loading packages differs from the one govulncheck was built
+	//     with.
+	// GOTOOLCHAIN=auto lets Go download whatever version the module's go.mod
+	// requires; some environments (and the official golang base image) pin it to
+	// "local", which would otherwise make source mode fail on newer modules.
+	pkg := "golang.org/x/vuln/cmd/govulncheck@" + version
+	cmd := exec.CommandContext(ctx, goBin, "-C", workdir, "run", pkg, "-format", "openvex", "./...")
+	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=auto")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

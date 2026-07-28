@@ -54,12 +54,17 @@ gives an advisory `likely` / `unlikely` / `unknown` exploitability verdict.
 
 ## Requirements
 
-- Go 1.23+ (also required at **runtime** for `--repo` source analysis)
+- A Go toolchain on `PATH` (also required at **runtime** for `--repo` source
+  analysis). Repo mode builds and runs `govulncheck` itself via `go run` with
+  `GOTOOLCHAIN=auto`, so Go will fetch whatever toolchain the scanned module
+  requires — no manual version matching needed.
 - [`skopeo`](https://github.com/containers/skopeo) on `PATH` — image mode
 - `git` on `PATH` — repo mode (unless scanning a local path)
 - [`govulncheck`](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck) on `PATH`
-  (required for repo mode; optional in image mode). Build it with the same Go
-  version you run, or source-mode package loading may fail.
+  — used only in image (binary) mode; optional. Repo mode does not need it
+  preinstalled.
+- Network access for `--repo` (to clone, download the module graph, and fetch a
+  toolchain if the module needs a newer Go than is installed)
 - `GITHUB_TOKEN` (or `GH_TOKEN`) when using `--llm`
 
 ## Install
@@ -178,10 +183,11 @@ granularity instead; these are coarser, so validate before transferring.
 - pclntab matching (image mode) is a heuristic. It is deliberately conservative
   (a genuinely-linked package is never reported absent), but validate candidates
   before publishing VEX.
-- Repo mode needs a Go toolchain and network access at runtime, and its
-  `govulncheck` must be built with a compatible Go version — otherwise
-  source-mode package loading fails. The published container image handles this
-  for you.
+- Repo mode needs a Go toolchain, `git` and network access at runtime. It runs
+  `govulncheck` via `go run` from inside the target module with
+  `GOTOOLCHAIN=auto`, so Go automatically fetches a newer toolchain when the
+  scanned module requires one. Override the govulncheck version with
+  `GOMODVEX_GOVULNCHECK_VERSION` if needed.
 
 ## License
 

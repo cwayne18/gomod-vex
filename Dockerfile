@@ -1,11 +1,14 @@
 # syntax=docker/dockerfile:1
 
 # gomod-vex supports two modes with different runtime needs:
-#   * image mode -> skopeo + govulncheck (no Go toolchain required)
-#   * repo mode  -> git + a Go toolchain (govulncheck source analysis)
+#   * image mode -> skopeo + a prebuilt govulncheck (binary scanning, no source)
+#   * repo mode  -> git + a Go toolchain; govulncheck is built and run on demand
+#     via `go run` from inside the target module so it always matches the Go
+#     version that module requires (see internal/source). GOTOOLCHAIN=auto lets
+#     Go fetch a newer toolchain when a scanned repo needs one.
 # The runtime image ships all of them so both modes work out of the box.
 
-ARG GO_VERSION=1.25
+ARG GO_VERSION=1.26
 
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-bookworm AS build
 ARG TARGETOS
@@ -20,8 +23,8 @@ RUN go mod download
 COPY . .
 RUN GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags="-s -w" -o /out/gomod-vex .
 
-# Build govulncheck with the SAME Go version so source-mode package loading does
-# not hit a toolchain / x-tools version mismatch.
+# Prebuilt govulncheck for image (binary) mode. Repo mode does not use this; it
+# builds govulncheck on demand with the toolchain the target module requires.
 RUN mkdir /tmp/gv && cd /tmp/gv \
     && go mod init govulncheck-build >/dev/null \
     && go get golang.org/x/vuln/cmd/govulncheck@latest \
