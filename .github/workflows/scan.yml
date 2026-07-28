@@ -15,6 +15,14 @@ on:
         description: "Go module import path to evaluate, or 'stdlib'"
         required: true
         type: string
+      ref:
+        description: "Optional branch, tag, or commit to check out for repo mode"
+        required: false
+        type: string
+      pre_build:
+        description: "Optional shell command run in the cloned repo before scanning (repo mode), e.g. 'make config' or 'go generate ./...' for repos that need codegen"
+        required: false
+        type: string
       llm:
         description: "Run the LLM exploitability check (--llm)"
         required: false
@@ -109,18 +117,50 @@ jobs:
       - name: Build gomod-vex
         run: go build -o gomod-vex .
 
+      - name: Prepare source (pre-build)
+        # Some repos don't compile from a clean checkout because they generate
+        # code during their build (e.g. warewulf `make config`, velociraptor
+        # `make assets`). govulncheck source mode needs the tree to type-check,
+        # so when a pre_build command is given we clone the repo ourselves, run
+        # it in the checkout, then scan that local path with --repo.
+        if: ${{ inputs.repo != '' && inputs.pre_build != '' }}
+        env:
+          REPO: ${{ inputs.repo }}
+          REF: ${{ inputs.ref }}
+          PRE_BUILD: ${{ inputs.pre_build }}
+        run: |
+          url="$REPO"
+          case "$url" in
+            http://*|https://*|git@*) ;;
+            github.com/*) url="https://$url" ;;
+            */*) url="https://github.com/$url" ;;
+          esac
+          src="$RUNNER_TEMP/scan-src"
+          rm -rf "$src"
+          git clone --depth 1 ${REF:+--branch "$REF"} "$url" "$src"
+          echo "Running pre-build: $PRE_BUILD"
+          ( cd "$src" && eval "$PRE_BUILD" )
+          echo "SRC_DIR=$src" >> "$GITHUB_ENV"
+
       - name: Run scan
         env:
           GITHUB_TOKEN: ${{ github.token }}
           REPO: ${{ inputs.repo }}
           IMAGE: ${{ inputs.image }}
           MODULE: ${{ inputs.module }}
+          REF: ${{ inputs.ref }}
           LLM: ${{ inputs.llm }}
         run: |
           if [ -n "$IMAGE" ]; then
             args=(--image "$IMAGE")
+          elif [ -n "$SRC_DIR" ]; then
+            # Pre-built local checkout (scanned in place, no re-clone).
+            args=(--repo "$SRC_DIR")
           else
             args=(--repo "$REPO")
+            if [ -n "$REF" ]; then
+              args+=(--ref "$REF")
+            fi
           fi
           args+=(--module "$MODULE")
           if [ "$LLM" = "true" ]; then
