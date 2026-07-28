@@ -13,8 +13,10 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -23,6 +25,17 @@ const DefaultEndpoint = "https://models.github.ai/inference/chat/completions"
 
 // DefaultModel is used when no model is specified.
 const DefaultModel = "openai/gpt-4o"
+
+// DefaultMinInterval is the default minimum spacing between API requests. GitHub
+// Models applies a low per-minute burst limit; spacing requests out keeps a
+// multi-binary scan from tripping the secondary (abuse) rate limit. Override
+// with GOMODVEX_LLM_MIN_INTERVAL (a Go duration such as "2s" or "0" to disable).
+const DefaultMinInterval = time.Second
+
+// maxRetryWait caps how long a single backoff wait can be, including a
+// server-provided Retry-After. GitHub's rate-limit windows are frequently 60s+,
+// so this must be large enough to actually outlast one.
+const maxRetryWait = 120 * time.Second
 
 // Verdict is the model's structured assessment.
 type Verdict struct {
@@ -47,6 +60,15 @@ type Client struct {
 	Endpoint string
 	Model    string
 	Token    string
+
+	// MinInterval is the minimum spacing enforced between outgoing requests.
+	MinInterval time.Duration
+
+	throttleMu sync.Mutex
+	lastReq    time.Time
+
+	cacheMu sync.Mutex
+	cache   map[string]*Verdict
 }
 
 // NewClient builds a Client. The token is read from GITHUB_TOKEN (or GH_TOKEN)
@@ -65,11 +87,26 @@ func NewClient(model, token string) (*Client, error) {
 		model = DefaultModel
 	}
 	return &Client{
-		HTTP:     &http.Client{Timeout: 60 * time.Second},
-		Endpoint: DefaultEndpoint,
-		Model:    model,
-		Token:    token,
+		HTTP:        &http.Client{Timeout: 60 * time.Second},
+		Endpoint:    DefaultEndpoint,
+		Model:       model,
+		Token:       token,
+		MinInterval: minIntervalFromEnv(),
+		cache:       make(map[string]*Verdict),
 	}, nil
+}
+
+// minIntervalFromEnv resolves the request spacing, honoring an optional
+// GOMODVEX_LLM_MIN_INTERVAL override.
+func minIntervalFromEnv() time.Duration {
+	v := strings.TrimSpace(os.Getenv("GOMODVEX_LLM_MIN_INTERVAL"))
+	if v == "" {
+		return DefaultMinInterval
+	}
+	if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+		return d
+	}
+	return DefaultMinInterval
 }
 
 type chatMessage struct {
@@ -101,8 +138,16 @@ Consider: whether the vulnerable functions are likely invoked with attacker-cont
 Respond with ONLY a JSON object, no prose, of the form:
 {"exploitable":"likely|unlikely|unknown","confidence":"low|medium|high","rationale":"one or two sentences"}`
 
-// Assess returns the model's verdict for a single CVE.
+// Assess returns the model's verdict for a single CVE. Identical requests
+// (same CVE, module, version, packages and reachability) are served from an
+// in-memory cache, so image-mode scans that link the same CVE into many
+// binaries only pay for one API call.
 func (c *Client) Assess(ctx context.Context, r Request) (*Verdict, error) {
+	key := cacheKey(r)
+	if v := c.cached(key); v != nil {
+		return v, nil
+	}
+
 	reach := r.Reachable
 	if reach == "" {
 		reach = "unknown"
@@ -125,9 +170,10 @@ func (c *Client) Assess(ctx context.Context, r Request) (*Verdict, error) {
 		return nil, err
 	}
 
-	const maxAttempts = 4
+	const maxAttempts = 6
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		c.throttle(ctx)
 		res, raw, err := c.do(ctx, body)
 		if err != nil {
 			lastErr = err
@@ -163,9 +209,57 @@ func (c *Client) Assess(ctx context.Context, r Request) (*Verdict, error) {
 		if len(cr.Choices) == 0 {
 			return nil, fmt.Errorf("github models: empty response")
 		}
-		return parseVerdict(cr.Choices[0].Message.Content)
+		v, err := parseVerdict(cr.Choices[0].Message.Content)
+		if err != nil {
+			return nil, err
+		}
+		c.store(key, v)
+		return v, nil
 	}
 	return nil, lastErr
+}
+
+// cacheKey canonicalizes a Request for verdict caching. It deliberately omits
+// the binary name so the same CVE, linked the same way, is only assessed once
+// even when it appears in many binaries.
+func cacheKey(r Request) string {
+	pkgs := append([]string(nil), r.Packages...)
+	sort.Strings(pkgs)
+	return strings.Join([]string{r.CVE, r.Module, r.Version, strings.Join(pkgs, ","), r.Reachable}, "|")
+}
+
+func (c *Client) cached(key string) *Verdict {
+	c.cacheMu.Lock()
+	defer c.cacheMu.Unlock()
+	return c.cache[key]
+}
+
+func (c *Client) store(key string, v *Verdict) {
+	c.cacheMu.Lock()
+	defer c.cacheMu.Unlock()
+	if c.cache == nil {
+		c.cache = make(map[string]*Verdict)
+	}
+	c.cache[key] = v
+}
+
+// throttle blocks until at least MinInterval has elapsed since the previous
+// request, smoothing bursts so a large scan does not trip the burst limit.
+func (c *Client) throttle(ctx context.Context) {
+	if c.MinInterval <= 0 {
+		return
+	}
+	c.throttleMu.Lock()
+	defer c.throttleMu.Unlock()
+	if !c.lastReq.IsZero() {
+		if wait := c.MinInterval - time.Since(c.lastReq); wait > 0 {
+			select {
+			case <-ctx.Done():
+			case <-time.After(wait):
+			}
+		}
+	}
+	c.lastReq = time.Now()
 }
 
 // do sends one request and returns the response (with a drained body) and the
@@ -197,7 +291,8 @@ func isRetryable(status int) bool {
 	return status == http.StatusTooManyRequests || status >= 500
 }
 
-// retryAfter parses the Retry-After header (seconds only) into a duration.
+// retryAfter parses the Retry-After header into a duration. GitHub Models sends
+// a delay in seconds, but the header may also be an HTTP date; both are handled.
 func retryAfter(res *http.Response) time.Duration {
 	if res == nil {
 		return 0
@@ -208,6 +303,11 @@ func retryAfter(res *http.Response) time.Duration {
 	}
 	if secs, err := strconv.Atoi(v); err == nil && secs >= 0 {
 		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
 	}
 	return 0
 }
@@ -221,10 +321,15 @@ func sleepBeforeRetry(ctx context.Context, attempt, maxAttempts int, hint time.D
 	}
 	wait := hint
 	if wait <= 0 {
-		wait = time.Duration(1<<uint(attempt-1)) * time.Second // 1s, 2s, 4s
+		// Exponential backoff (1s, 2s, 4s, ...) capped modestly; a server that
+		// wants us to wait longer says so via Retry-After (the hint above).
+		wait = time.Duration(1<<uint(attempt-1)) * time.Second
+		if wait > 30*time.Second {
+			wait = 30 * time.Second
+		}
 	}
-	if wait > 30*time.Second {
-		wait = 30 * time.Second
+	if wait > maxRetryWait {
+		wait = maxRetryWait
 	}
 	select {
 	case <-ctx.Done():

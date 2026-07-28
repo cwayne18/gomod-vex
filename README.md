@@ -82,6 +82,21 @@ For CVEs whose vulnerable code is genuinely linked (image mode) or reachable
 (repo mode), a [GitHub Models](https://github.com/marketplace/models) chat model
 gives an advisory `likely` / `unlikely` / `unknown` exploitability verdict.
 
+GitHub Models enforces a low per-minute burst limit, so a scan that assesses
+many CVEs can hit `429 Too Many Requests` (sometimes phrased as a Terms of
+Service / "scraping" notice — that is GitHub's secondary rate limit). `gomod-vex`
+mitigates this by:
+
+- **caching verdicts** per CVE — in image mode the same CVE linked into many
+  binaries is assessed once and reused;
+- **spacing out requests** (default 1s between calls); tune or disable this with
+  `GOMODVEX_LLM_MIN_INTERVAL` (a Go duration, e.g. `2s`, or `0` to disable);
+- **retrying** `429`/`5xx` with backoff, honoring the server's `Retry-After`
+  (up to two minutes) so a rate-limit window is actually outlasted.
+
+A failed assessment is non-fatal: the finding is still reported (e.g. `LINKED`),
+just without an LLM verdict.
+
 ## Requirements
 
 - A Go toolchain on `PATH` (also required at **runtime** for `--repo` source

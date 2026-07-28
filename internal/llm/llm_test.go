@@ -114,3 +114,37 @@ func containsAll(s string, subs ...string) bool {
 	}
 	return true
 }
+
+// TestAssessCachesVerdict verifies that a second identical request (differing
+// only by binary name) is served from cache without a second API call.
+func TestAssessCachesVerdict(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"exploitable\":\"likely\",\"confidence\":\"high\",\"rationale\":\"ok\"}"}}]}`))
+	}))
+	defer srv.Close()
+
+	c := testClient(srv.URL)
+	base := Request{CVE: "CVE-1", Module: "golang.org/x/net", Version: "v0.7.0", Reachable: "linked"}
+	if _, err := c.Assess(context.Background(), Request{CVE: base.CVE, Module: base.Module, Version: base.Version, Reachable: base.Reachable, Binary: "bin-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Assess(context.Background(), Request{CVE: base.CVE, Module: base.Module, Version: base.Version, Reachable: base.Reachable, Binary: "bin-b"}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Errorf("expected 1 API call (second served from cache), got %d", calls)
+	}
+}
+
+// TestRetryAfterHonorsLongDelay verifies a Retry-After larger than the old 30s
+// cap is honored (up to maxRetryWait) rather than silently clamped.
+func TestRetryAfterHonorsLongDelay(t *testing.T) {
+	res := &http.Response{Header: http.Header{}}
+	res.Header.Set("Retry-After", "75")
+	if got := retryAfter(res); got != 75*time.Second {
+		t.Errorf("retryAfter = %v, want 75s", got)
+	}
+}
