@@ -58,6 +58,11 @@ type Options struct {
 	OS      string
 	Arch    string
 
+	// GoVersion optionally pins the Go toolchain for repo-mode analysis
+	// (e.g. "1.24.0"). Mainly useful with --module stdlib, whose findings depend
+	// on the toolchain version.
+	GoVersion string
+
 	UseLLM   bool
 	LLMModel string
 	Token    string
@@ -78,6 +83,11 @@ type Result struct {
 func Run(ctx context.Context, opts Options) (*Result, error) {
 	if opts.Logf == nil {
 		opts.Logf = func(string, ...any) {}
+	}
+	// The Go standard library is "stdlib" in OSV and govulncheck; accept "std"
+	// as a convenience alias.
+	if opts.Module == "std" {
+		opts.Module = binscan.StdlibModule
 	}
 	if opts.Image != "" && opts.Repo != "" {
 		return nil, fmt.Errorf("set only one of --image or --repo")
@@ -212,7 +222,7 @@ func runRepo(ctx context.Context, opts Options) (*Result, error) {
 		}
 	}
 
-	stmts, err := source.CloneAndScan(ctx, opts.Repo, opts.Ref, opts.Path, logf)
+	stmts, err := source.CloneAndScan(ctx, opts.Repo, opts.Ref, opts.Path, opts.GoVersion, logf)
 	if err != nil {
 		return nil, err
 	}

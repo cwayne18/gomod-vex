@@ -52,6 +52,30 @@ A local checkout path or `file://` URL is scanned in place without cloning.
 > memory (in a container, raise the memory limit, e.g. `docker run --memory=8g`),
 > scope the scan with `--repo-path <subdir>`, or fall back to `--image` mode.
 
+### Standard library (`--module stdlib`)
+
+Go standard-library CVEs are supported in both modes — pass `--module stdlib`
+(the name OSV and govulncheck use; `--module std` is accepted as an alias):
+
+```sh
+# Image mode: the Go version comes from each binary's build info, and pclntab
+# tells you which vulnerable stdlib packages (net/http, crypto/x509, ...) are
+# actually linked into each binary.
+gomod-vex --image myorg/app:latest --module stdlib --cves CVE-2025-22870
+
+# Repo mode: govulncheck reports stdlib reachability. Results depend on the Go
+# toolchain used, so pin it with --go-version to target a specific release.
+gomod-vex --repo github.com/rancher/rancher --module stdlib --go-version 1.24.0
+```
+
+In repo mode the stdlib version analyzed is the one of the Go toolchain that
+runs govulncheck. `GOTOOLCHAIN=auto` only ever *upgrades*, so without
+`--go-version` a repo is scanned with the newest locally-available toolchain
+(inside the container image, the base Go version). Pin `--go-version` to assess
+a particular release. Note that a pinned older toolchain may be too old to build
+the latest `govulncheck`; pair it with `GOMODVEX_GOVULNCHECK_VERSION` (e.g.
+`v1.1.4`) if `go run` reports a version requirement.
+
 ### LLM exploitability check (optional, `--llm`)
 
 For CVEs whose vulnerable code is genuinely linked (image mode) or reachable
@@ -156,10 +180,11 @@ gomod-vex \
 | `--repo` | | Git source repo to analyze via govulncheck source mode |
 | `--ref` | *(default branch)* | Branch, tag, or commit to check out for `--repo` |
 | `--repo-path` | `.` | Module subdirectory within `--repo` to scan |
-| `--module` | *(required)* | Go module import path to evaluate |
+| `--module` | *(required)* | Go module import path to evaluate (or `stdlib` for the standard library) |
 | `--cves` | *(all)* | Comma-separated CVE / GHSA / GO ids; empty checks every advisory for the version |
 | `--cves-file` | | File with one id per line (merged with `--cves`; `#` comments allowed) |
 | `--version` | *(auto)* | Override the module version (image mode) instead of reading build info |
+| `--go-version` | *(auto)* | Pin the Go toolchain for `--repo` analysis, e.g. `1.24.0` (useful with `--module stdlib`) |
 | `--os` / `--arch` | `linux` / `amd64` | Image platform variant to pull (image mode) |
 | `--llm` | `false` | Consult a GitHub Models LLM on genuinely-affected CVEs |
 | `--llm-model` | `openai/gpt-4o` | GitHub Models model id for `--llm` |

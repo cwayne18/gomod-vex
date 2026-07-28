@@ -76,7 +76,10 @@ type queryResponse struct {
 // alias identifier is a key in the returned map so a caller may look up a CVE,
 // GHSA or GO id interchangeably.
 func (c *Client) Query(ctx context.Context, module, version string) (map[string]*Advisory, error) {
+	// OSV expects a bare numeric version. Tolerate both the module "v" prefix
+	// and the stdlib "go" prefix ("go1.24.0" -> "1.24.0").
 	version = strings.TrimPrefix(version, "v")
+	version = strings.TrimPrefix(version, "go")
 
 	var req queryRequest
 	req.Package.Ecosystem = "Go"

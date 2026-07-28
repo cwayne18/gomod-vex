@@ -81,3 +81,17 @@ func TestDiagnoseNoOutputGeneric(t *testing.T) {
 		t.Fatalf("expected passthrough error, got %v", err)
 	}
 }
+
+func TestNormalizeGoVersion(t *testing.T) {
+	cases := map[string]string{
+		"1.24.0":   "1.24.0",
+		"go1.24.0": "1.24.0",
+		"v1.24.0":  "1.24.0",
+		" go1.25 ": "1.25",
+	}
+	for in, want := range cases {
+		if got := normalizeGoVersion(in); got != want {
+			t.Errorf("normalizeGoVersion(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

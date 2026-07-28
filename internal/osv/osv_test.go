@@ -2,6 +2,7 @@ package osv
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -61,5 +62,30 @@ func TestQueryAliasMappingAndPreference(t *testing.T) {
 	// must win over the empty GHSA-only record.
 	if got := m["CVE-2023-39325"].GoID; got != "GO-2023-1988" {
 		t.Errorf("expected import-carrying record to win, got GoID %q", got)
+	}
+}
+
+func TestQueryNormalizesStdlibVersion(t *testing.T) {
+	var gotVersion, gotName string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req queryRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		gotVersion = req.Version
+		gotName = req.Package.Name
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"vulns":[]}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient()
+	c.URL = srv.URL
+	if _, err := c.Query(context.Background(), "stdlib", "go1.24.0"); err != nil {
+		t.Fatal(err)
+	}
+	if gotVersion != "1.24.0" {
+		t.Errorf("version sent to OSV = %q, want 1.24.0", gotVersion)
+	}
+	if gotName != "stdlib" {
+		t.Errorf("name sent to OSV = %q, want stdlib", gotName)
 	}
 }

@@ -37,8 +37,10 @@ func (s Statement) IDs() []string {
 // CloneAndScan clones repoArg (optionally at ref) and runs govulncheck source
 // mode from subPath within the checkout. The checkout is removed before return.
 // If repoArg points at an existing local directory (or a file:// URL) it is
-// scanned in place instead of being cloned.
-func CloneAndScan(ctx context.Context, repoArg, ref, subPath string, logf func(string, ...any)) ([]Statement, error) {
+// scanned in place instead of being cloned. goVersion, when non-empty, pins the
+// Go toolchain used for analysis (GOTOOLCHAIN=go<goVersion>), which matters for
+// standard-library findings since those depend on the toolchain version.
+func CloneAndScan(ctx context.Context, repoArg, ref, subPath, goVersion string, logf func(string, ...any)) ([]Statement, error) {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
@@ -47,7 +49,7 @@ func CloneAndScan(ctx context.Context, repoArg, ref, subPath string, logf func(s
 		workdir := joinSub(local, subPath)
 		logf("Scanning local checkout %s...", workdir)
 		logf("Running govulncheck (source mode)...")
-		return govulncheckSource(ctx, workdir)
+		return govulncheckSource(ctx, workdir, goVersion)
 	}
 
 	dir, err := os.MkdirTemp("", "gomod-vex-src-")
@@ -64,7 +66,7 @@ func CloneAndScan(ctx context.Context, repoArg, ref, subPath string, logf func(s
 
 	workdir := joinSub(dir, subPath)
 	logf("Running govulncheck (source mode) — this downloads the module graph and may take a while...")
-	return govulncheckSource(ctx, workdir)
+	return govulncheckSource(ctx, workdir, goVersion)
 }
 
 // localPath returns a filesystem directory for repoArg when it refers to a
@@ -124,6 +126,15 @@ func refNote(ref string) string {
 	return " @ " + ref
 }
 
+// normalizeGoVersion strips a leading "go" or "v" so a caller may pass "1.24.0",
+// "go1.24.0" or "v1.24.0" interchangeably for the toolchain pin.
+func normalizeGoVersion(v string) string {
+	v = strings.TrimSpace(v)
+	v = strings.TrimPrefix(v, "go")
+	v = strings.TrimPrefix(v, "v")
+	return v
+}
+
 func clone(ctx context.Context, url, ref, dir string) error {
 	if _, err := exec.LookPath("git"); err != nil {
 		return fmt.Errorf("git not found on PATH: %w", err)
@@ -177,7 +188,7 @@ type product struct {
 // via `go run`. Override with GOMODVEX_GOVULNCHECK_VERSION.
 const defaultGovulncheckVersion = "latest"
 
-func govulncheckSource(ctx context.Context, workdir string) ([]Statement, error) {
+func govulncheckSource(ctx context.Context, workdir, goVersion string) ([]Statement, error) {
 	goBin, err := exec.LookPath("go")
 	if err != nil {
 		return nil, fmt.Errorf("go toolchain not found on PATH (required for source mode): %w", err)
@@ -202,9 +213,15 @@ func govulncheckSource(ctx context.Context, workdir string) ([]Statement, error)
 	// GOTOOLCHAIN=auto lets Go download whatever version the module's go.mod
 	// requires; some environments (and the official golang base image) pin it to
 	// "local", which would otherwise make source mode fail on newer modules.
+	// When the caller pins a Go version (relevant for stdlib findings, which are
+	// toolchain-specific) we force that exact toolchain instead.
+	toolchain := "GOTOOLCHAIN=auto"
+	if goVersion != "" {
+		toolchain = "GOTOOLCHAIN=go" + normalizeGoVersion(goVersion)
+	}
 	pkg := "golang.org/x/vuln/cmd/govulncheck@" + version
 	cmd := exec.CommandContext(ctx, goBin, "-C", workdir, "run", pkg, "-format", "openvex", "./...")
-	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=auto")
+	cmd.Env = append(os.Environ(), toolchain)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

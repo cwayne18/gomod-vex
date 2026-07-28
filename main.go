@@ -23,10 +23,11 @@ func main() {
 		repo       = flag.String("repo", "", "git source repo to analyze via govulncheck source mode, e.g. github.com/rancher/rancher (mutually exclusive with --image)")
 		ref        = flag.String("ref", "", "branch, tag, or commit to check out for --repo (default: repo default branch)")
 		repoPath   = flag.String("repo-path", ".", "module subdirectory within --repo to scan")
-		module     = flag.String("module", "", "Go module import path to evaluate (required)")
+		module     = flag.String("module", "", "Go module import path to evaluate, or 'stdlib' for the standard library (required)")
 		cvesFlag   = flag.String("cves", "", "comma-separated CVE/GHSA/GO ids to check; empty checks every advisory found for the module version")
 		cvesFile   = flag.String("cves-file", "", "path to a file with one CVE/GHSA/GO id per line (merged with --cves)")
 		version    = flag.String("version", "", "override the module version (image mode only; default: read from each binary's build info)")
+		goVersion  = flag.String("go-version", "", "pin the Go toolchain for --repo analysis, e.g. 1.24.0 (useful with --module stdlib)")
 		goos       = flag.String("os", "linux", "image OS variant to pull (image mode)")
 		arch       = flag.String("arch", "amd64", "image architecture variant to pull (image mode)")
 		useLLM     = flag.Bool("llm", false, "consult a GitHub Models LLM on genuinely-affected CVEs for exploitability")
@@ -63,18 +64,19 @@ func main() {
 	defer cancel()
 
 	res, err := analyze.Run(ctx, analyze.Options{
-		Image:    *image,
-		Repo:     *repo,
-		Ref:      *ref,
-		Path:     *repoPath,
-		Module:   *module,
-		CVEs:     cves,
-		Version:  *version,
-		OS:       *goos,
-		Arch:     *arch,
-		UseLLM:   *useLLM,
-		LLMModel: *llmModel,
-		Logf:     logf,
+		Image:     *image,
+		Repo:      *repo,
+		Ref:       *ref,
+		Path:      *repoPath,
+		Module:    *module,
+		CVEs:      cves,
+		Version:   *version,
+		OS:        *goos,
+		Arch:      *arch,
+		GoVersion: *goVersion,
+		UseLLM:    *useLLM,
+		LLMModel:  *llmModel,
+		Logf:      logf,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -252,6 +254,10 @@ Examples:
   # Source repo (govulncheck source-mode reachability)
   gomod-vex --repo github.com/rancher/rancher --module golang.org/x/net \
     --cves CVE-2023-39325
+
+  # Standard library CVEs (module "stdlib")
+  gomod-vex --image myorg/app:latest --module stdlib --cves CVE-2025-22870
+  gomod-vex --repo github.com/rancher/rancher --module stdlib --go-version 1.24.0
 
   # Share the report as a public gist (needs GITHUB_TOKEN/GH_TOKEN with gist scope)
   gomod-vex --image rancher/hardened-kubernetes:v1.30.1 --module golang.org/x/net \

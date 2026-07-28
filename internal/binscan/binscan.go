@@ -81,12 +81,21 @@ func looksExecutable(path string) bool {
 	return false
 }
 
+// StdlibModule is the module name the Go vulnerability database and govulncheck
+// use for the standard library. Its "version" is the Go toolchain version.
+const StdlibModule = "stdlib"
+
 // ModuleVersion returns the version of module as linked into the binary, or ""
 // if the module is not a dependency. It checks the main module, direct/indirect
-// deps and honours replace directives.
+// deps and honours replace directives. For the standard library (StdlibModule)
+// it returns the binary's Go toolchain version, since stdlib is not listed as a
+// dependency.
 func (b Binary) ModuleVersion(module string) string {
 	if b.Info == nil {
 		return ""
+	}
+	if module == StdlibModule || module == "std" {
+		return NormalizeGoVersion(b.Info.GoVersion)
 	}
 	if b.Info.Main.Path == module && b.Info.Main.Version != "" {
 		return b.Info.Main.Version
@@ -105,6 +114,21 @@ func (b Binary) ModuleVersion(module string) string {
 		}
 	}
 	return ""
+}
+
+// NormalizeGoVersion turns a build-info Go version string ("go1.24.0", or
+// "go1.24.0 X:boringcrypto") into the numeric version OSV expects ("1.24.0").
+// It returns "" for development builds whose version is not a released tag.
+func NormalizeGoVersion(v string) string {
+	fields := strings.Fields(v)
+	if len(fields) == 0 {
+		return ""
+	}
+	ver := fields[0]
+	if !strings.HasPrefix(ver, "go") {
+		return "" // e.g. "devel ..." — no released stdlib version to match
+	}
+	return strings.TrimPrefix(ver, "go")
 }
 
 // Symbols is a loaded copy of a binary's bytes used for pclntab presence tests.

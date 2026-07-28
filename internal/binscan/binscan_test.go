@@ -1,6 +1,9 @@
 package binscan
 
-import "testing"
+import (
+	"debug/buildinfo"
+	"testing"
+)
 
 func TestPackagePresent(t *testing.T) {
 	blob := []byte("prefixgolang.org/x/net/http2.(*Framer).ReadFrame\x00other golang.org/x/net/idna.ToASCII junk")
@@ -35,5 +38,33 @@ func TestModulePresent(t *testing.T) {
 	}
 	if s.ModulePresent("golang.org/x/net") {
 		t.Errorf("x/net must not be present")
+	}
+}
+
+func TestNormalizeGoVersion(t *testing.T) {
+	cases := map[string]string{
+		"go1.24.0":                "1.24.0",
+		"go1.21.5":                "1.21.5",
+		"go1.24.0 X:boringcrypto": "1.24.0",
+		"devel go1.26-abc":        "",
+		"":                        "",
+	}
+	for in, want := range cases {
+		if got := NormalizeGoVersion(in); got != want {
+			t.Errorf("NormalizeGoVersion(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestModuleVersionStdlib(t *testing.T) {
+	b := Binary{Info: &buildinfo.BuildInfo{GoVersion: "go1.24.0"}}
+	if got := b.ModuleVersion("stdlib"); got != "1.24.0" {
+		t.Errorf("stdlib version = %q, want 1.24.0", got)
+	}
+	if got := b.ModuleVersion("std"); got != "1.24.0" {
+		t.Errorf("std alias version = %q, want 1.24.0", got)
+	}
+	if got := b.ModuleVersion("golang.org/x/net"); got != "" {
+		t.Errorf("non-dep module = %q, want empty", got)
 	}
 }
