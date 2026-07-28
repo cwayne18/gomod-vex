@@ -14,25 +14,28 @@ import (
 	"syscall"
 
 	"github.com/cwayne18/gomod-vex/internal/analyze"
+	"github.com/cwayne18/gomod-vex/internal/gist"
 )
 
 func main() {
 	var (
-		image    = flag.String("image", "", "container image reference to inspect (mutually exclusive with --repo)")
-		repo     = flag.String("repo", "", "git source repo to analyze via govulncheck source mode, e.g. github.com/rancher/rancher (mutually exclusive with --image)")
-		ref      = flag.String("ref", "", "branch, tag, or commit to check out for --repo (default: repo default branch)")
-		repoPath = flag.String("repo-path", ".", "module subdirectory within --repo to scan")
-		module   = flag.String("module", "", "Go module import path to evaluate (required)")
-		cvesFlag = flag.String("cves", "", "comma-separated CVE/GHSA/GO ids to check; empty checks every advisory found for the module version")
-		cvesFile = flag.String("cves-file", "", "path to a file with one CVE/GHSA/GO id per line (merged with --cves)")
-		version  = flag.String("version", "", "override the module version (image mode only; default: read from each binary's build info)")
-		goos     = flag.String("os", "linux", "image OS variant to pull (image mode)")
-		arch     = flag.String("arch", "amd64", "image architecture variant to pull (image mode)")
-		useLLM   = flag.Bool("llm", false, "consult a GitHub Models LLM on genuinely-affected CVEs for exploitability")
-		llmModel = flag.String("llm-model", "openai/gpt-4o", "GitHub Models model id for --llm")
-		format   = flag.String("format", "text", "output format: text or json")
-		out      = flag.String("out", "", "write output to this file instead of stdout")
-		quiet    = flag.Bool("quiet", false, "suppress progress logging on stderr")
+		image      = flag.String("image", "", "container image reference to inspect (mutually exclusive with --repo)")
+		repo       = flag.String("repo", "", "git source repo to analyze via govulncheck source mode, e.g. github.com/rancher/rancher (mutually exclusive with --image)")
+		ref        = flag.String("ref", "", "branch, tag, or commit to check out for --repo (default: repo default branch)")
+		repoPath   = flag.String("repo-path", ".", "module subdirectory within --repo to scan")
+		module     = flag.String("module", "", "Go module import path to evaluate (required)")
+		cvesFlag   = flag.String("cves", "", "comma-separated CVE/GHSA/GO ids to check; empty checks every advisory found for the module version")
+		cvesFile   = flag.String("cves-file", "", "path to a file with one CVE/GHSA/GO id per line (merged with --cves)")
+		version    = flag.String("version", "", "override the module version (image mode only; default: read from each binary's build info)")
+		goos       = flag.String("os", "linux", "image OS variant to pull (image mode)")
+		arch       = flag.String("arch", "amd64", "image architecture variant to pull (image mode)")
+		useLLM     = flag.Bool("llm", false, "consult a GitHub Models LLM on genuinely-affected CVEs for exploitability")
+		llmModel   = flag.String("llm-model", "openai/gpt-4o", "GitHub Models model id for --llm")
+		format     = flag.String("format", "text", "output format: text or json")
+		out        = flag.String("out", "", "write output to this file instead of stdout")
+		gistFlag   = flag.Bool("gist", false, "also upload the output to a public GitHub gist and print its URL (needs GITHUB_TOKEN/GH_TOKEN with gist scope)")
+		gistSecret = flag.Bool("gist-secret", false, "with --gist, create a secret (unlisted) gist instead of a public one")
+		quiet      = flag.Bool("quiet", false, "suppress progress logging on stderr")
 	)
 	flag.Usage = usage
 	flag.Parse()
@@ -103,6 +106,30 @@ func main() {
 	} else {
 		fmt.Print(rendered)
 	}
+
+	if *gistFlag {
+		url, err := uploadGist(ctx, res, rendered, *format, !*gistSecret)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: gist upload failed: %v\n", err)
+			os.Exit(1)
+		}
+		logf("Uploaded report to gist")
+		fmt.Println(url)
+	}
+}
+
+// uploadGist pushes the rendered report to a GitHub gist and returns its URL.
+func uploadGist(ctx context.Context, res *analyze.Result, rendered, format string, public bool) (string, error) {
+	client, err := gist.NewClient("")
+	if err != nil {
+		return "", err
+	}
+	filename := "gomod-vex-report.txt"
+	if format == "json" {
+		filename = "gomod-vex-report.json"
+	}
+	desc := fmt.Sprintf("gomod-vex %s report for %s (module %s)", res.Mode, res.Target, res.Module)
+	return client.Create(ctx, filename, desc, rendered, public)
 }
 
 func parseCVEs(flagVal, file string) []string {
@@ -225,6 +252,10 @@ Examples:
   # Source repo (govulncheck source-mode reachability)
   gomod-vex --repo github.com/rancher/rancher --module golang.org/x/net \
     --cves CVE-2023-39325
+
+  # Share the report as a public gist (needs GITHUB_TOKEN/GH_TOKEN with gist scope)
+  gomod-vex --image rancher/hardened-kubernetes:v1.30.1 --module golang.org/x/net \
+    --cves CVE-2023-39325 --gist
 
 Flags:
 `)

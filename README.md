@@ -71,7 +71,8 @@ gives an advisory `likely` / `unlikely` / `unknown` exploitability verdict.
   preinstalled.
 - Network access for `--repo` (to clone, download the module graph, and fetch a
   toolchain if the module needs a newer Go than is installed)
-- `GITHUB_TOKEN` (or `GH_TOKEN`) when using `--llm`
+- `GITHUB_TOKEN` (or `GH_TOKEN`) when using `--llm` (or `--gist`; that also needs
+  `gist` scope)
 
 ## Install
 
@@ -164,9 +165,16 @@ gomod-vex \
 | `--llm-model` | `openai/gpt-4o` | GitHub Models model id for `--llm` |
 | `--format` | `text` | `text` or `json` |
 | `--out` | *(stdout)* | Write output to a file |
+| `--gist` | `false` | Also upload the output to a public GitHub gist and print its URL (needs a token with `gist` scope) |
+| `--gist-secret` | `false` | With `--gist`, create a secret (unlisted) gist instead of a public one |
 | `--quiet` | `false` | Suppress progress logging on stderr |
 
 Exactly one of `--image` or `--repo` is required.
+
+`--gist` uploads whatever would otherwise be printed (respecting `--format`) to a
+gist using the same `GITHUB_TOKEN` / `GH_TOKEN` as `--llm`; the token needs
+`gist` scope. The gist URL is printed to stdout after the report. It composes
+with `--out` (the report is written to the file *and* uploaded).
 
 ## Output statuses
 
