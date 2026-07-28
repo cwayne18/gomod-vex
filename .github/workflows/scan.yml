@@ -48,8 +48,11 @@ jobs:
         # Source-mode govulncheck builds a whole-program call graph and can need
         # well over the runner's RAM on large repos (e.g. rancher/rancher). A big
         # swapfile lets it complete instead of being OOM-killed (signal: killed).
+        # The runner ships an active /swapfile, so replace it with a larger one.
         run: |
-          sudo fallocate -l 24G /swapfile
+          sudo swapoff -a || true
+          sudo rm -f /swapfile
+          sudo fallocate -l 16G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
