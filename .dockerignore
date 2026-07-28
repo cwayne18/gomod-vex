@@ -1,0 +1,7 @@
+.git
+.github
+dist
+gomod-vex
+*.out
+*.log
+README.md

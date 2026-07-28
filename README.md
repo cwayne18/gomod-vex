@@ -56,6 +56,25 @@ cd gomod-vex
 go build -o gomod-vex .
 ```
 
+### Container image (GHCR)
+
+A self-contained image bundling `skopeo` and `govulncheck` is published to
+[`ghcr.io/cwayne18/gomod-vex`](https://github.com/cwayne18/gomod-vex/pkgs/container/gomod-vex)
+on every push to `main` and every `v*` tag:
+
+```sh
+docker run --rm ghcr.io/cwayne18/gomod-vex:latest \
+  --image rancher/hardened-coredns:v1.14.6 \
+  --module golang.org/x/net --cves CVE-2023-39325
+```
+
+Pass a token through the environment to enable `--llm`:
+
+```sh
+docker run --rm -e GITHUB_TOKEN ghcr.io/cwayne18/gomod-vex:latest \
+  --image myorg/myapp:latest --module golang.org/x/crypto --llm
+```
+
 ## Usage
 
 ```sh
