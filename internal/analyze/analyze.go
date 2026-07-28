@@ -9,26 +9,29 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/cwayne18/gomod-vex/internal/binscan"
 	"github.com/cwayne18/gomod-vex/internal/image"
 	"github.com/cwayne18/gomod-vex/internal/llm"
 	"github.com/cwayne18/gomod-vex/internal/osv"
+	"github.com/cwayne18/gomod-vex/internal/source"
 )
 
-// Status classifies a (binary, CVE) pair.
+// Status classifies a (binary/repo, CVE) pair.
 type Status string
 
 const (
-	StatusNotPresent   Status = "not_present"         // vulnerable package absent from pclntab
+	StatusNotPresent   Status = "not_present"         // vulnerable package absent (pclntab / govulncheck source)
 	StatusNotInPath    Status = "not_in_execute_path" // linked but govulncheck says unreachable
-	StatusLinked       Status = "linked"              // vulnerable package genuinely linked
-	StatusUndetermined Status = "undetermined"        // could not resolve OSV mapping
+	StatusLinked       Status = "linked"              // vulnerable package genuinely linked (image mode)
+	StatusReachable    Status = "reachable"           // vulnerable symbol is called (source mode)
+	StatusUndetermined Status = "undetermined"        // could not resolve a mapping
 )
 
-// Finding is the per-binary, per-CVE result.
+// Finding is the per-binary (or per-repo), per-CVE result.
 type Finding struct {
-	Binary        string       `json:"binary"`
+	Binary        string       `json:"binary,omitempty"`
 	Module        string       `json:"module"`
 	Version       string       `json:"version"`
 	CVE           string       `json:"cve"`
@@ -43,12 +46,15 @@ type Finding struct {
 	LLM           *llm.Verdict `json:"llm,omitempty"`
 }
 
-// Options configure a run.
+// Options configure a run. Set exactly one of Image or Repo.
 type Options struct {
 	Image   string
+	Repo    string // git repo (source mode); mutually exclusive with Image
+	Ref     string // branch/tag/commit for Repo
+	Path    string // module subdirectory within Repo (default ".")
 	Module  string
-	CVEs    []string // optional filter; empty means "all advisories for module@version"
-	Version string   // optional override of the detected module version
+	CVEs    []string // optional filter; empty means "all advisories for the module version"
+	Version string   // optional override of the detected module version (image mode)
 	OS      string
 	Arch    string
 
@@ -62,13 +68,31 @@ type Options struct {
 
 // Result is the full analysis output.
 type Result struct {
-	Image    string    `json:"image"`
+	Target   string    `json:"target"` // image ref or repo
+	Mode     string    `json:"mode"`   // "image" | "repo"
 	Module   string    `json:"module"`
 	Findings []Finding `json:"findings"`
 }
 
-// Run executes the full pipeline.
+// Run dispatches to image or source-repo analysis.
 func Run(ctx context.Context, opts Options) (*Result, error) {
+	if opts.Logf == nil {
+		opts.Logf = func(string, ...any) {}
+	}
+	if opts.Image != "" && opts.Repo != "" {
+		return nil, fmt.Errorf("set only one of --image or --repo")
+	}
+	if opts.Repo != "" {
+		return runRepo(ctx, opts)
+	}
+	if opts.Image != "" {
+		return runImage(ctx, opts)
+	}
+	return nil, fmt.Errorf("one of --image or --repo is required")
+}
+
+// runImage extracts a container image and inspects its Go binaries.
+func runImage(ctx context.Context, opts Options) (*Result, error) {
 	logf := opts.Logf
 	if logf == nil {
 		logf = func(string, ...any) {}
@@ -108,7 +132,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		}
 	}
 
-	result := &Result{Image: opts.Image, Module: opts.Module}
+	result := &Result{Target: opts.Image, Mode: "image", Module: opts.Module}
 
 	for _, bin := range bins {
 		version := opts.Version
@@ -172,6 +196,131 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		return a.CVE < b.CVE
 	})
 	return result, nil
+}
+
+// runRepo clones a git repository and runs govulncheck in source mode, whose
+// call-graph reachability is authoritative for a source tree.
+func runRepo(ctx context.Context, opts Options) (*Result, error) {
+	logf := opts.Logf
+
+	var llmClient *llm.Client
+	if opts.UseLLM {
+		var err error
+		llmClient, err = llm.NewClient(opts.LLMModel, opts.Token)
+		if err != nil {
+			return nil, fmt.Errorf("llm client: %w", err)
+		}
+	}
+
+	stmts, err := source.CloneAndScan(ctx, opts.Repo, opts.Ref, opts.Path, logf)
+	if err != nil {
+		return nil, err
+	}
+
+	result := &Result{Target: opts.Repo, Mode: "repo", Module: opts.Module}
+
+	// Index statements for the target module by every id they are known by.
+	byID := map[string]source.Statement{}
+	moduleSeen := false
+	var moduleVersion string
+	for _, st := range stmts {
+		if st.Module != opts.Module {
+			continue
+		}
+		moduleSeen = true
+		if moduleVersion == "" {
+			moduleVersion = st.Version
+		}
+		for _, id := range st.IDs() {
+			byID[id] = st
+		}
+	}
+
+	makeFinding := func(id string, st source.Statement, matched bool) Finding {
+		f := Finding{
+			Module:  opts.Module,
+			Version: moduleVersion,
+			CVE:     id,
+			Method:  "govulncheck-source",
+		}
+		if !matched {
+			// No govulncheck statement for this id at the scanned version.
+			if moduleSeen {
+				f.Version = moduleVersion
+				f.Status = StatusNotPresent
+				f.Justification = "vulnerable_code_not_present"
+				f.Reason = "not flagged by govulncheck source analysis"
+			} else {
+				f.Status = StatusUndetermined
+				f.Reason = "module_not_in_dependency_graph"
+			}
+			return f
+		}
+		f.GoID = st.GoID
+		f.Version = st.Version
+		switch {
+		case st.Status == "affected":
+			f.Status = StatusReachable
+			if llmClient != nil {
+				v, lerr := llmClient.Assess(ctx, llm.Request{
+					CVE:       id,
+					Module:    opts.Module,
+					Version:   st.Version,
+					Binary:    "source tree",
+					Reachable: "reachable (govulncheck source mode: the vulnerable symbol is called)",
+				})
+				if lerr != nil {
+					logf("  ! LLM assess failed for %s: %v", id, lerr)
+				} else {
+					f.LLM = v
+				}
+			}
+		case st.Justification == "vulnerable_code_not_in_execute_path":
+			f.Status = StatusNotInPath
+			f.Justification = st.Justification
+		default: // vulnerable_code_not_present or any other not_affected
+			f.Status = StatusNotPresent
+			if st.Justification != "" {
+				f.Justification = st.Justification
+			} else {
+				f.Justification = "vulnerable_code_not_present"
+			}
+		}
+		return f
+	}
+
+	if len(opts.CVEs) > 0 {
+		for _, id := range opts.CVEs {
+			st, ok := byID[id]
+			result.Findings = append(result.Findings, makeFinding(id, st, ok))
+		}
+	} else {
+		// Report every distinct advisory govulncheck found for the module.
+		seen := map[string]bool{}
+		for _, st := range stmts {
+			if st.Module != opts.Module || seen[st.GoID] {
+				continue
+			}
+			seen[st.GoID] = true
+			id := primaryID(st)
+			result.Findings = append(result.Findings, makeFinding(id, st, true))
+		}
+	}
+
+	sort.Slice(result.Findings, func(i, j int) bool {
+		return result.Findings[i].CVE < result.Findings[j].CVE
+	})
+	return result, nil
+}
+
+// primaryID prefers a CVE alias for display, falling back to the GO id.
+func primaryID(st source.Statement) string {
+	for _, a := range st.Aliases {
+		if strings.HasPrefix(a, "CVE-") {
+			return a
+		}
+	}
+	return st.GoID
 }
 
 type request struct {
