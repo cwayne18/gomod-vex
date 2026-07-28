@@ -1,0 +1,73 @@
+name: scan
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "GitHub repo to scan, e.g. github.com/rancher/rancher or rancher/rancher"
+        required: true
+        type: string
+      module:
+        description: "Go module import path to evaluate, or 'stdlib'"
+        required: true
+        type: string
+      llm:
+        description: "Run the LLM exploitability check (--llm)"
+        required: false
+        type: boolean
+        default: false
+      runner:
+        description: "Runner label. ubuntu-latest is the largest free option for public repos (4 vCPU / 16 GB). The larger options only work if your account/org has GitHub larger runners configured."
+        required: false
+        type: choice
+        default: ubuntu-latest
+        options:
+          - ubuntu-latest
+          - ubuntu-latest-4-cores
+          - ubuntu-latest-8-cores
+          - ubuntu-latest-16-cores
+          - ubuntu-latest-32-cores
+          - ubuntu-latest-64-cores
+
+permissions:
+  contents: read
+  # Lets the built-in GITHUB_TOKEN call GitHub Models for --llm.
+  models: read
+
+jobs:
+  scan:
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Add swap
+        # Source-mode govulncheck builds a whole-program call graph and can need
+        # well over the runner's RAM on large repos (e.g. rancher/rancher). A big
+        # swapfile lets it complete instead of being OOM-killed (signal: killed).
+        run: |
+          sudo fallocate -l 24G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
+      - name: Build gomod-vex
+        run: go build -o gomod-vex .
+
+      - name: Run scan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPO: ${{ inputs.repo }}
+          MODULE: ${{ inputs.module }}
+          LLM: ${{ inputs.llm }}
+        run: |
+          args=(--repo "$REPO" --module "$MODULE")
+          if [ "$LLM" = "true" ]; then
+            args+=(--llm)
+          fi
+          echo "Running: gomod-vex ${args[*]}"
+          ./gomod-vex "${args[@]}"
