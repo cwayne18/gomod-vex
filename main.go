@@ -4,23 +4,29 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 
 	"github.com/cwayne18/gomod-vex/internal/analyze"
+	"github.com/cwayne18/gomod-vex/internal/archive"
+	flagutil "github.com/cwayne18/gomod-vex/internal/flag"
 	"github.com/cwayne18/gomod-vex/internal/gist"
 )
 
 func main() {
 	var (
-		image      = flag.String("image", "", "container image reference to inspect (mutually exclusive with --repo)")
-		repo       = flag.String("repo", "", "git source repo to analyze via govulncheck source mode, e.g. github.com/rancher/rancher (mutually exclusive with --image)")
+		image      = flag.String("image", "", "container image reference to inspect (mutually exclusive with --repo and --image-file)")
+		repo       = flag.String("repo", "", "git source repo to analyze via govulncheck source mode, e.g. github.com/rancher/rancher (mutually exclusive with --image and --image-file)")
+		imageFile  = flag.String("image-file", "", "the local or remote path to an images.txt file e.g. ./imagelist.txt, https://github.com/rancher/rke2/releases/download/v1.36.2%2Brke2r1/rke2-images.linux-amd64.txt (mutually exclusive with --image and --repo)")
 		ref        = flag.String("ref", "", "branch, tag, or commit to check out for --repo (default: repo default branch)")
 		repoPath   = flag.String("repo-path", ".", "module subdirectory within --repo to scan")
 		module     = flag.String("module", "", "Go module import path to evaluate, or 'stdlib' for the standard library (required)")
@@ -46,8 +52,8 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
-	if (*image == "") == (*repo == "") {
-		fmt.Fprintln(os.Stderr, "error: set exactly one of --image or --repo")
+	if !flagutil.OneOf(*image, *repo, *imageFile) {
+		fmt.Fprintln(os.Stderr, "error: set exactly one of --image, --repo or --image-file")
 		flag.Usage()
 		os.Exit(2)
 	}
@@ -63,8 +69,20 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	// if repo isn't set, get the list of images to analyze either from --image xor
+	// from --image-file
+	var images []string
+	if *repo == "" {
+		var err error
+		images, err = imageList(ctx, *image, *imageFile, logf)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(2)
+		}
+	}
+
 	res, err := analyze.Run(ctx, analyze.Options{
-		Image:     *image,
+		Images:    images,
 		Repo:      *repo,
 		Ref:       *ref,
 		Path:      *repoPath,
@@ -121,7 +139,7 @@ func main() {
 }
 
 // uploadGist pushes the rendered report to a GitHub gist and returns its URL.
-func uploadGist(ctx context.Context, res *analyze.Result, rendered, format string, public bool) (string, error) {
+func uploadGist(ctx context.Context, results analyze.Results, rendered, format string, public bool) (string, error) {
 	client, err := gist.NewClient("")
 	if err != nil {
 		return "", err
@@ -130,7 +148,21 @@ func uploadGist(ctx context.Context, res *analyze.Result, rendered, format strin
 	if format == "json" {
 		filename = "gomod-vex-report.json"
 	}
-	desc := fmt.Sprintf("gomod-vex %s report for %s (module %s)", res.Mode, res.Target, res.Module)
+
+	var (
+		mode, module string
+		target       []string
+	)
+	for i, res := range results {
+		// use the first result's mode and module for the gist description because they are the same
+		// for all results, but accumulate all targets
+		if i == 0 {
+			mode = res.Mode
+			module = res.Module
+		}
+		target = append(target, res.Target)
+	}
+	desc := fmt.Sprintf("gomod-vex %s report for %s (module %s)", mode, strings.Join(target, ","), module)
 	return client.Create(ctx, filename, desc, rendered, public)
 }
 
@@ -164,53 +196,57 @@ func parseCVEs(flagVal, file string) []string {
 	return out
 }
 
-func renderText(res *analyze.Result) string {
+func renderText(results analyze.Results) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "gomod-vex report (%s) for %s\n", res.Mode, res.Target)
-	fmt.Fprintf(&b, "module: %s\n\n", res.Module)
+	for _, res := range results {
+		fmt.Fprintf(&b, "gomod-vex report (%s) for %s\n", res.Mode, res.Target)
+		fmt.Fprintf(&b, "module: %s\n\n", res.Module)
 
-	if len(res.Findings) == 0 {
-		b.WriteString("No findings: the module was not linked into any Go binary in this image,\n")
-		b.WriteString("or no matching advisories were found.\n")
-		return b.String()
-	}
+		if len(res.Findings) == 0 {
+			b.WriteString("No findings: the module was not linked into any Go binary in this image,\n")
+			b.WriteString("or no matching advisories were found.\n")
+			b.WriteString("\n")
+			continue
+		}
 
-	// Group by status for a readable summary.
-	counts := map[analyze.Status]int{}
-	for _, f := range res.Findings {
-		counts[f.Status]++
-	}
-	fmt.Fprintf(&b, "summary: %d not_present, %d not_in_execute_path, %d linked, %d reachable, %d undetermined\n\n",
-		counts[analyze.StatusNotPresent], counts[analyze.StatusNotInPath],
-		counts[analyze.StatusLinked], counts[analyze.StatusReachable],
-		counts[analyze.StatusUndetermined])
+		// Group by status for a readable summary.
+		counts := map[analyze.Status]int{}
+		for _, f := range res.Findings {
+			counts[f.Status]++
+		}
+		fmt.Fprintf(&b, "summary: %d not_present, %d not_in_execute_path, %d linked, %d reachable, %d undetermined\n\n",
+			counts[analyze.StatusNotPresent], counts[analyze.StatusNotInPath],
+			counts[analyze.StatusLinked], counts[analyze.StatusReachable],
+			counts[analyze.StatusUndetermined])
 
-	for _, f := range res.Findings {
-		id := f.CVE
-		if f.GoID != "" && f.GoID != f.CVE {
-			id = fmt.Sprintf("%s (%s)", f.CVE, f.GoID)
-		}
-		fmt.Fprintf(&b, "%-22s %s@%s\n", statusLabel(f.Status), f.Module, f.Version)
-		fmt.Fprintf(&b, "  cve:      %s\n", id)
-		if f.Binary != "" {
-			fmt.Fprintf(&b, "  binary:   %s%s\n", f.Binary, strippedNote(f.Stripped))
-		}
-		if len(f.Packages) > 0 {
-			fmt.Fprintf(&b, "  packages: %s (%s)\n", strings.Join(f.Packages, ", "), f.Granularity)
-		}
-		if f.Justification != "" {
-			fmt.Fprintf(&b, "  vex:      %s [%s]\n", f.Justification, f.Method)
-		} else if f.Method != "" && f.Status == analyze.StatusReachable {
-			fmt.Fprintf(&b, "  method:   %s\n", f.Method)
-		}
-		if f.Reason != "" {
-			fmt.Fprintf(&b, "  reason:   %s\n", f.Reason)
-		}
-		if f.LLM != nil {
-			fmt.Fprintf(&b, "  llm:      exploitable=%s confidence=%s\n", f.LLM.Exploitable, f.LLM.Confidence)
-			if f.LLM.Rationale != "" {
-				fmt.Fprintf(&b, "            %s\n", f.LLM.Rationale)
+		for _, f := range res.Findings {
+			id := f.CVE
+			if f.GoID != "" && f.GoID != f.CVE {
+				id = fmt.Sprintf("%s (%s)", f.CVE, f.GoID)
 			}
+			fmt.Fprintf(&b, "%-22s %s@%s\n", statusLabel(f.Status), f.Module, f.Version)
+			fmt.Fprintf(&b, "  cve:      %s\n", id)
+			if f.Binary != "" {
+				fmt.Fprintf(&b, "  binary:   %s%s\n", f.Binary, strippedNote(f.Stripped))
+			}
+			if len(f.Packages) > 0 {
+				fmt.Fprintf(&b, "  packages: %s (%s)\n", strings.Join(f.Packages, ", "), f.Granularity)
+			}
+			if f.Justification != "" {
+				fmt.Fprintf(&b, "  vex:      %s [%s]\n", f.Justification, f.Method)
+			} else if f.Method != "" && f.Status == analyze.StatusReachable {
+				fmt.Fprintf(&b, "  method:   %s\n", f.Method)
+			}
+			if f.Reason != "" {
+				fmt.Fprintf(&b, "  reason:   %s\n", f.Reason)
+			}
+			if f.LLM != nil {
+				fmt.Fprintf(&b, "  llm:      exploitable=%s confidence=%s\n", f.LLM.Exploitable, f.LLM.Confidence)
+				if f.LLM.Rationale != "" {
+					fmt.Fprintf(&b, "            %s\n", f.LLM.Rationale)
+				}
+			}
+			b.WriteString("\n")
 		}
 		b.WriteString("\n")
 	}
@@ -266,4 +302,73 @@ Examples:
 Flags:
 `)
 	flag.PrintDefaults()
+}
+
+// imageList returns a list of images to analyze, either from the --image flag or
+// --image-file (local or remote) file containing one image per line. --image takes
+// precedence over --image-file. Lines starting with '#' are treated as comments
+// and ignored. Empty lines are also ignored.
+func imageList(ctx context.Context, image string, imageFile string, logf func(string, ...any)) ([]string, error) {
+	if image != "" {
+		return []string{image}, nil
+	}
+
+	normalize := func(buf *bytes.Buffer) ([]string, error) {
+		var imageList []string
+		decompressed, err := archive.EnsureDecompressed(buf)
+		if err != nil {
+			return nil, err
+		}
+
+		d, err := io.ReadAll(decompressed)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, image := range strings.Split(string(d), "\n") {
+			trimmed := strings.TrimSpace(image)
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				continue // skip empty lines and comments
+			}
+			imageList = append(imageList, trimmed)
+		}
+
+		if len(imageList) == 0 {
+			return nil, fmt.Errorf("no images found in %s", imageFile)
+		}
+		return imageList, nil
+	}
+
+	logf("Fetching image list from %s", imageFile)
+	if flagutil.IsHTTPURL(imageFile) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, imageFile, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create http request for %s: %w", imageFile, err)
+		}
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed http get %s: %w", imageFile, err)
+		}
+		//nolint:errcheck
+		defer resp.Body.Close()
+
+		// any non-200 response is treated as error because the body won't have the image list.
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("failed http get %s: %s", imageFile, resp.Status)
+		}
+
+		buf := &bytes.Buffer{}
+		if _, err := buf.ReadFrom(resp.Body); err != nil {
+			return nil, fmt.Errorf("failed reading from http response body: %w", err)
+		}
+		return normalize(buf)
+	}
+
+	content, err := os.ReadFile(imageFile)
+	if err != nil {
+		return nil, fmt.Errorf("read file %s: %w", imageFile, err)
+	}
+	buf := bytes.NewBuffer(content)
+	return normalize(buf)
 }
