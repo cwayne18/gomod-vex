@@ -36,6 +36,8 @@ For every Go binary in the image that links the target module, `gomod-vex`:
 Module versions are read straight from each binary's embedded build info
 (`debug/buildinfo`), so no Trivy report or manual version input is required.
 
+Use `--image-file` to scan a list of images from a local or remote text file.
+
 ### Repo mode (`--repo`)
 
 The repo is cloned (shallow) and analyzed with **govulncheck source mode**,
@@ -150,8 +152,9 @@ docker run --rm -e GITHUB_TOKEN ghcr.io/cwayne18/gomod-vex:latest \
 ## Usage
 
 ```sh
-gomod-vex --image REF  --module PATH [--cves LIST] [flags]   # image mode
-gomod-vex --repo  REPO --module PATH [--cves LIST] [flags]   # repo mode
+gomod-vex --image      REF      --module PATH [--cves LIST] [flags]   # image mode
+gomod-vex --image-file FILEPATH --module PATH [--cves LIST] [flags]   # image mode (read list of images from an image file)
+gomod-vex --repo       REPO     --module PATH [--cves LIST] [flags]   # repo mode
 ```
 
 Check two specific `x/net` CVEs in an image:
@@ -191,8 +194,9 @@ gomod-vex \
 
 | Flag | Default | Description |
 |---|---|---|
-| `--image` | | Container image to inspect (mutually exclusive with `--repo`) |
-| `--repo` | | Git source repo to analyze via govulncheck source mode |
+| `--image` | | Container image to inspect (mutually exclusive with `--repo` and `--image-file`) |
+| `--image-file` | | Local or remote image file with list of container images to inspect (mutually exclusive with `--image` and `--repo`) |
+| `--repo` | | Git source repo to analyze via govulncheck source mode (mutually exclusive with `--image` and `--image-file`)|
 | `--ref` | *(default branch)* | Branch, tag, or commit to check out for `--repo` |
 | `--repo-path` | `.` | Module subdirectory within `--repo` to scan |
 | `--module` | *(required)* | Go module import path to evaluate (or `stdlib` for the standard library) |
@@ -209,7 +213,7 @@ gomod-vex \
 | `--gist-secret` | `false` | With `--gist`, create a secret (unlisted) gist instead of a public one |
 | `--quiet` | `false` | Suppress progress logging on stderr |
 
-Exactly one of `--image` or `--repo` is required.
+Exactly one of `--image`, `--repo` or `--image-file` is required.
 
 `--gist` uploads whatever would otherwise be printed (respecting `--format`) to a
 gist using the same `GITHUB_TOKEN` / `GH_TOKEN` as `--llm`; the token needs

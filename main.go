@@ -279,8 +279,9 @@ func usage() {
 	fmt.Fprint(os.Stderr, `gomod-vex - check whether Go-module CVEs are actually present in an image or source repo
 
 Usage:
-  gomod-vex --image REF   --module PATH [--cves LIST] [flags]
-  gomod-vex --repo  REPO  --module PATH [--cves LIST] [flags]
+  gomod-vex --image      REF       --module PATH [--cves LIST] [flags]
+  gomod-vex --image-file FILEPATH  --module PATH [--cves LIST] [flags]
+  gomod-vex --repo       REPO      --module PATH [--cves LIST] [flags]
 
 Examples:
   # Container image (pclntab + govulncheck binary mode)
@@ -298,6 +299,10 @@ Examples:
   # Share the report as a public gist (needs GITHUB_TOKEN/GH_TOKEN with gist scope)
   gomod-vex --image rancher/hardened-kubernetes:v1.30.1 --module golang.org/x/net \
     --cves CVE-2023-39325 --gist
+
+	# Fetch and analyze a list of images from a remote images.txt file
+	gomod-vex --image-file "https://github.com/rancher/rke2/releases/download/v1.36.3-rc5%2Brke2r1/rke2-images.linux-amd64.txt" \
+    --module golang.org/x/crypto
 
 Flags:
 `)
