@@ -6,6 +6,7 @@ package analyze
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -46,12 +47,12 @@ type Finding struct {
 	LLM           *llm.Verdict `json:"llm,omitempty"`
 }
 
-// Options configure a run. Set exactly one of Image or Repo.
+// Options configure a run. Set exactly one of Images or Repo.
 type Options struct {
-	Image   string
-	Repo    string // git repo (source mode); mutually exclusive with Image
-	Ref     string // branch/tag/commit for Repo
-	Path    string // module subdirectory within Repo (default ".")
+	Images  []string // image list (image mode); mutually exclusive with Repo
+	Repo    string   // git repo (source mode); mutually exclusive with Images
+	Ref     string   // branch/tag/commit for Repo
+	Path    string   // module subdirectory within Repo (default ".")
 	Module  string
 	CVEs    []string // optional filter; empty means "all advisories for the module version"
 	Version string   // optional override of the detected module version (image mode)
@@ -71,6 +72,8 @@ type Options struct {
 	Logf func(format string, args ...any)
 }
 
+type Results []*Result
+
 // Result is the full analysis output.
 type Result struct {
 	Target   string    `json:"target"` // image ref or repo
@@ -80,7 +83,7 @@ type Result struct {
 }
 
 // Run dispatches to image or source-repo analysis.
-func Run(ctx context.Context, opts Options) (*Result, error) {
+func Run(ctx context.Context, opts Options) (Results, error) {
 	if opts.Logf == nil {
 		opts.Logf = func(string, ...any) {}
 	}
@@ -89,20 +92,36 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	if opts.Module == "std" {
 		opts.Module = binscan.StdlibModule
 	}
-	if opts.Image != "" && opts.Repo != "" {
-		return nil, fmt.Errorf("set only one of --image or --repo")
+	if len(opts.Images) > 0 && opts.Repo != "" {
+		return nil, fmt.Errorf("set only one of --image, --repo, or --image-file")
 	}
 	if opts.Repo != "" {
-		return runRepo(ctx, opts)
+		res, err := runRepo(ctx, opts)
+		if err != nil {
+			return nil, fmt.Errorf("repo %s: %w", opts.Repo, err)
+		}
+		return Results{res}, nil
 	}
-	if opts.Image != "" {
-		return runImage(ctx, opts)
+	if len(opts.Images) > 0 {
+		var (
+			results []*Result
+			errs    error
+		)
+		for _, img := range opts.Images {
+			res, err := runImage(ctx, img, opts)
+			if err != nil {
+				errs = errors.Join(errs, fmt.Errorf("%s: %w", img, err))
+				continue
+			}
+			results = append(results, res)
+		}
+		return results, errs
 	}
-	return nil, fmt.Errorf("one of --image or --repo is required")
+	return nil, fmt.Errorf("one of --image, --repo or --image-file is required")
 }
 
 // runImage extracts a container image and inspects its Go binaries.
-func runImage(ctx context.Context, opts Options) (*Result, error) {
+func runImage(ctx context.Context, img string, opts Options) (*Result, error) {
 	logf := opts.Logf
 	if logf == nil {
 		logf = func(string, ...any) {}
@@ -120,10 +139,10 @@ func runImage(ctx context.Context, opts Options) (*Result, error) {
 	}
 	defer os.RemoveAll(dest)
 
-	logf("Extracting %s (%s/%s)...", opts.Image, opts.OS, opts.Arch)
+	logf("Extracting %s (%s/%s)...", img, opts.OS, opts.Arch)
 	ex := image.NewExtractor()
 	ex.OS, ex.Arch = opts.OS, opts.Arch
-	if err := ex.Extract(ctx, opts.Image, dest); err != nil {
+	if err := ex.Extract(ctx, img, dest); err != nil {
 		return nil, fmt.Errorf("extract image: %w", err)
 	}
 
@@ -142,7 +161,7 @@ func runImage(ctx context.Context, opts Options) (*Result, error) {
 		}
 	}
 
-	result := &Result{Target: opts.Image, Mode: "image", Module: opts.Module}
+	result := &Result{Target: img, Mode: "image", Module: opts.Module}
 
 	for _, bin := range bins {
 		version := opts.Version
